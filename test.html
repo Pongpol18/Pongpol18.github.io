@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>URL Checker + Block ระบบแจ้งเบาะแส</title>
+<style>
+:root {
+  --bg:#f0f4f8;
+  --card:#fff;
+  --primary:#2563eb;
+  --safe:#16a34a;
+  --warn:#f59e0b;
+  --danger:#ef4444;
+  --neutral:#6b7280;
+}
+body {
+  font-family: 'Inter', system-ui, Arial;
+  background: var(--bg);
+  margin: 0;
+  padding: 30px;
+  display:flex;
+  justify-content:center;
+  flex-direction:column;
+  align-items:center;
+}
+.wrap { width: 960px; max-width: 96%; }
+.card {
+  background: var(--card);
+  border-radius: 16px;
+  padding: 24px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+  margin-bottom: 24px;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+.card:hover { transform: translateY(-3px); box-shadow: 0 12px 40px rgba(0,0,0,0.12); }
+h1,h2 { margin: 0 0 12px 0; font-weight: 600; }
+h1 { font-size: 22px; }
+h2 { font-size: 18px; color: var(--neutral); }
+.row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+input[type="text"] {
+  flex:1; padding:14px 16px; border-radius:12px; border:1px solid #d1d5db; font-size:16px;
+}
+button {
+  padding:12px 18px; border-radius:12px; border:none; background:var(--primary);
+  color:white; cursor:pointer; font-size:16px; transition:0.3s;
+}
+button:hover { background:#1e40af; }
+button.ghost { background:transparent; color:var(--primary); border:1px solid #d1d5db; }
+button.clearBtn { color:var(--danger); border-color:#fecaca; }
+#emoji { width:140px; height:140px; display:block; margin:14px auto; }
+#message { text-align:center; font-weight:600; font-size:17px; margin-top:10px; }
+.status-safe { color:var(--safe); }
+.status-suspicious { color:var(--warn); }
+.status-unsafe { color:var(--danger); }
+.status-unknown { color:var(--neutral); }
+table { width:100%; border-collapse:collapse; margin-top:14px; font-size:14px; }
+th, td { padding:10px 12px; text-align:left; border-bottom:1px solid #e5e7eb; vertical-align:top; }
+th { font-weight:600; color:#374151; }
+.small { font-size:13px; color:#6b7280; }
+.controls { display:flex; gap:8px; justify-content:flex-end; margin-top:8px; }
+@media (max-width:640px){
+  .row { flex-direction:column; align-items:stretch; }
+  .controls { justify-content:space-between; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>🔎 ตรวจสอบ URL (Google Safe Browsing)</h1>
+    <div class="row">
+      <input id="urlInput" type="text" placeholder="ใส่ URL เช่น https://example.com" />
+      <button id="checkBtn">ตรวจสอบ</button>
+      <button id="refreshBtn" class="ghost">รีเฟรช</button>
+      <button id="clearBtn" class="ghost clearBtn">ล้างประวัติ</button>
+    </div>
+    <div id="resultArea" style="margin-top:20px; text-align:center;">
+      <img id="emoji" src="https://cdn-icons-png.flaticon.com/512/742/742751.png" alt="emoji">
+      <div id="message" class="status-unknown small">ยังไม่ได้ตรวจสอบ</div>
+      <button id="reportBtn" class="ghost" style="display:none; margin:10px auto;"
+        onclick="reportCurrentUrl()">แจ้งเบาะแส</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+      <h2>📜 ประวัติการตรวจสอบ</h2>
+      <div class="small" id="countLabel">0 รายการ</div>
+    </div>
+    <div class="controls">
+      <div id="lastUpdated" class="small"></div>
+    </div>
+    <table id="historyTable" aria-live="polite">
+      <thead>
+        <tr><th style="width:160px">เวลา</th><th>URL</th><th style="width:100px">ผล</th><th style="width:240px">เหตุผล</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const MAX_HISTORY = 50;
+const STORAGE_KEY = "modern_url_checker_history_v2";
+const GOOGLE_API_KEY = "AIzaSyD-Ps35vDvx7YT4IkuN34owFooDiIeNAtw";
+const GOOGLE_ENDPOINT = `https://safebrowsing.googleapis.com/v4/threatMatches:find?key=${GOOGLE_API_KEY}`;
+const BLOCK_THRESHOLD = 3;
+
+const checkBtn = document.getElementById("checkBtn");
+const refreshBtn = document.getElementById("refreshBtn");
+const clearBtn = document.getElementById("clearBtn");
+const urlInput = document.getElementById("urlInput");
+const emoji = document.getElementById("emoji");
+const message = document.getElementById("message");
+const reportBtn = document.getElementById("reportBtn");
+const historyTbody = document.querySelector("#historyTable tbody");
+const countLabel = document.getElementById("countLabel");
+const lastUpdated = document.getElementById("lastUpdated");
+
+let history = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+let lastCheckedUrl = ""; // เก็บ URL ล่าสุด
+
+function escapeHtml(text) {
+  if (!text) return "";
+  return String(text).replace(/[&<>"'`=\/]/g, s=>({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;","/":"&#x2F;","`":"&#x60","=":"&#x3D;"
+  }[s]));
+}
+function nowISO(){ return new Date().toISOString(); }
+
+function setResultUI(status, summary){
+  if(status==="safe"){
+    emoji.src="https://cdn-icons-png.flaticon.com/512/742/742751.png";
+    message.textContent="✅ ปลอดภัย — "+(summary||"");
+    message.className="status-safe";
+    reportBtn.style.display="none";
+  } else if(status==="suspicious"){
+    emoji.src="https://cdn-icons-png.flaticon.com/512/742/742774.png";
+    message.textContent="⚠️ น่าสงสัย — "+(summary||"");
+    message.className="status-suspicious";
+    reportBtn.style.display="none";
+  } else if(status==="unsafe"){
+    emoji.src="https://cdn-icons-png.flaticon.com/512/742/742772.png";
+    message.textContent="❌ อันตราย — "+(summary||"");
+    message.className="status-unsafe";
+    reportBtn.style.display="block";
+  } else {
+    emoji.src="https://cdn-icons-png.flaticon.com/512/565/565547.png";
+    message.textContent=summary||"สถานะไม่ทราบ";
+    message.className="status-unknown";
+    reportBtn.style.display="none";
+  }
+}
+
+function renderHistory(){
+  historyTbody.innerHTML="";
+  history.forEach(item=>{
+    const tr=document.createElement("tr");
+    const time=new Date(item.checked_at).toLocaleString();
+    tr.innerHTML=`<td>${escapeHtml(time)}</td>
+      <td style="max-width:480px; word-break:break-all">${escapeHtml(item.url)}</td>
+      <td class="${item.status==='safe'?'status-safe':item.status==='unsafe'?'status-unsafe':'status-suspicious'}" style="font-weight:700">${escapeHtml(item.status)}</td>
+      <td style="max-width:300px; word-break:break-word">${escapeHtml(item.reason||'')} ${item.reportCount?`(แจ้งเบาะแส ${item.reportCount} ครั้ง)`:""}</td>`;
+    historyTbody.appendChild(tr);
+  });
+  countLabel.textContent=`${history.length} รายการ`;
+  lastUpdated.textContent=`อัพเดทล่าสุด: ${new Date().toLocaleString()}`;
+}
+
+async function checkWithGoogleSafeBrowsing(url){
+  const body={
+    client:{clientId:"url-checker", clientVersion:"1.0"},
+    threatInfo:{
+      threatTypes:["MALWARE","SOCIAL_ENGINEERING","UNWANTED_SOFTWARE","POTENTIALLY_HARMFUL_APPLICATION"],
+      platformTypes:["ANY_PLATFORM"],
+      threatEntryTypes:["URL"],
+      threatEntries:[{url}]
+    }
+  };
+  try{
+    const res = await fetch(GOOGLE_ENDPOINT,{
+      method:"POST",
+      body:JSON.stringify(body),
+      headers:{"Content-Type":"application/json"}
+    });
+    const data = await res.json();
+    if(data && data.matches && data.matches.length>0){
+      return {status:"unsafe", reason:"พบภัยคุกคาม (Google Safe Browsing)"};
+    } else {
+      return {status:"safe", reason:"ไม่พบภัยคุกคาม (Google Safe Browsing)"};
+    }
+  } catch(err){
+    console.error(err);
+    return {status:"unknown", reason:"ตรวจสอบกับ Google ไม่สำเร็จ"};
+  }
+}
+
+async function performCheck(rawUrl){
+  if(!rawUrl){ alert("กรุณาใส่ URL"); return; }
+  lastCheckedUrl = rawUrl; // เก็บ URL ล่าสุด
+  message.textContent="⏳ กำลังตรวจสอบ...";
+  setResultUI("unknown","กำลังตรวจสอบ...");
+
+  let result;
+  if(/ufa|bet/i.test(rawUrl)){
+    result={status:"unsafe", reason:"เว็บไซต์พนัน (ตรวจพบคำว่า ufa/bet)"};
+  } else {
+    result = await checkWithGoogleSafeBrowsing(rawUrl);
+  }
+
+  const existing = history.find(h=>h.url===rawUrl);
+  if(existing && existing.reportCount>=BLOCK_THRESHOLD){
+    result.status="unsafe";
+    result.reason="ถูกบล็อกอัตโนมัติ (แจ้งเบาะแสมากเกิน)";
+  }
+
+  setResultUI(result.status, result.reason);
+
+  if(existing){
+    existing.status=result.status;
+    existing.reason=result.reason;
+    existing.checked_at=nowISO();
+  } else {
+    history.unshift({url:rawUrl,status:result.status,reason:result.reason,checked_at:nowISO(), reportCount:0});
+  }
+  if(history.length>MAX_HISTORY) history=history.slice(0,MAX_HISTORY);
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(history));
+  renderHistory();
+}
+
+function reportCurrentUrl(){
+  if(!lastCheckedUrl) return;
+  let item = history.find(h=>h.url===lastCheckedUrl);
+  if(!item){
+    item={url:lastCheckedUrl, status:"unsafe", reason:"ถูกแจ้งเบาะแส", checked_at:nowISO(), reportCount:0};
+    history.unshift(item);
+  }
+  item.reportCount = (item.reportCount||0)+1;
+  if(item.reportCount>=BLOCK_THRESHOLD){
+    item.status="unsafe";
+    item.reason=`ถูกบล็อกอัตโนมัติ (แจ้งเบาะแสมากกว่า ${BLOCK_THRESHOLD} ครั้ง)`;
+    alert("⚠️ URL นี้ถูกบล็อกอัตโนมัติ");
+  }
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(history));
+  renderHistory();
+  window.open('https://www.thaipoliceonline.go.th/', '_blank');
+}
+
+checkBtn.addEventListener("click",()=>{ performCheck(urlInput.value.trim()); urlInput.value=""; });
+refreshBtn.addEventListener("click",renderHistory);
+clearBtn.addEventListener("click",()=>{if(!confirm("แน่ใจหรือไม่ว่าต้องการล้างประวัติทั้งหมด?")) return; history=[]; localStorage.removeItem(STORAGE_KEY); renderHistory();});
+urlInput.addEventListener("keydown",(e)=>{if(e.key==="Enter"){e.preventDefault(); checkBtn.click();}});
+renderHistory();
+</script>
+</body>
+</html>
